@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+
+body{
+  font-family: 'Times New Roman', Times, serif;
+}
+.active{
+  color: #268EC1;
+  border-top: 2px solid white;
+  font-weight: 600;
+  font-style: italic;
+
+}
+
+.slick-next{
+
+  background-color: #268EC1 !important;
+  border-radius:50%;
+}
+.slick-prev{
+
+  background-color: #268EC1 !important;
+  border-radius:50%;
+}
+
+.mar{
+  margin-left: 10px !important;
+  margin-right: 10px !important;
+  padding: 20px
+}
