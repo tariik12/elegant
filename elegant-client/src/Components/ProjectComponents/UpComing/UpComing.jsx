@@ -12,7 +12,7 @@ const UpComing = () => {
   });
 
   const upComingConstructionData = constructionDatas
-    ? constructionDatas.filter(({ status }) => status === "On Going")
+    ? constructionDatas.filter(({ status }) => status === "Upcoming")
     : [];
 
   return (

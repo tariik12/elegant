@@ -1,800 +1,735 @@
+// app.js
+require("dotenv").config();
 
-const express = require('express');
-const session = require('express-session');
-const mysql = require('mysql'); 
-const crypto = require('crypto');
-const cors = require('cors');
-const multer = require('multer');
-const path = require('path');
-const { promises: fs } = require('fs');
+const express = require("express");
+const session = require("express-session");
+const mysql = require("mysql2/promise");
+const cors = require("cors");
+const multer = require("multer");
+const path = require("path");
+const { promises: fs } = require("fs");
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = Number(process.env.PORT || 3000);
 
-const generateRandomString = (length) => {
-  return crypto.randomBytes(Math.ceil(length / 2))
-    .toString('hex') // Convert to hexadecimal format
-    .slice(0, length); // Trim to the desired length
+const IMAGES_DIR = path.join(__dirname, "im", "images");
+
+// -------------------- Helpers --------------------
+const ensureDir = async (dir) => {
+  try {
+    await fs.mkdir(dir, { recursive: true });
+  } catch (e) {
+    // ignore
+  }
 };
 
-// Generate a secure random string of, for example, 32 characters
-const secureRandomString = generateRandomString(32);
-
-
-
-app.use(cors());
-app.use(express.json());
-app.use(express.static('im'));
-app.use(session({
-  secret: secureRandomString,
-  resave: false,
-  saveUninitialized: true,
-}));
-
-const pool = mysql.createPool({
-  user: "root",
-  host: "localhost",
-  password: "",
-  database: "mytodo",
-});
-
-// Check the connection
-pool.getConnection((err, connection) => {
-  if (err) {
-    console.error('Error connecting to the database: ', err);
-  } else {
-    console.log('Connected to the database');
-    connection.release();
+const safeUnlink = async (filePath) => {
+  try {
+    await fs.unlink(filePath);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return; // file doesn't exist
+    throw err;
   }
+};
+
+const safeUnlinkMany = async (fileNames) => {
+  const list = (fileNames || []).filter(Boolean);
+  for (const f of list) {
+    const p = path.join(IMAGES_DIR, f);
+    await safeUnlink(p);
+  }
+};
+
+// when DB fails after multer upload, delete newly uploaded files to avoid orphan files
+const deleteUploadedFilesFromReq = async (req) => {
+  const files = [];
+
+  // upload.single
+  if (req.file?.filename) files.push(req.file.filename);
+
+  // upload.fields
+  if (req.files && typeof req.files === "object") {
+    for (const key of Object.keys(req.files)) {
+      for (const f of req.files[key] || []) {
+        if (f?.filename) files.push(f.filename);
+      }
+    }
+  }
+
+  await safeUnlinkMany(files);
+};
+
+// -------------------- Middlewares --------------------
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+  })
+);
+
+app.use(express.json());
+
+// Serve static (so /images/filename works OR direct /im/images/filename if you want)
+app.use(express.static("im"));
+
+// Session (IMPORTANT: use fixed secret from env)
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET || "change_this_in_env",
+    resave: false,
+    saveUninitialized: true,
+    cookie: {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: false, // set true only if HTTPS
+    },
+  })
+);
+
+// -------------------- DB Pool (Promise) --------------------
+const pool = mysql.createPool({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  port: Number(process.env.DB_PORT || 3306),
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
 });
 
+// Check DB connection
+(async () => {
+  try {
+    await ensureDir(IMAGES_DIR);
+    const conn = await pool.getConnection();
+    console.log("Connected to the database");
+    conn.release();
+  } catch (err) {
+    console.error("DB connection error:", err.message || err);
+  }
+})();
+
+// -------------------- Multer Setup --------------------
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'im/images');
+  destination: async (req, file, cb) => {
+    await ensureDir(IMAGES_DIR);
+    cb(null, IMAGES_DIR);
   },
   filename: (req, file, cb) => {
-    cb(null, file.fieldname + "_" + Date.now() + path.extname(file.originalname));
+    const ext = path.extname(file.originalname || "").toLowerCase();
+    cb(null, `${file.fieldname}_${Date.now()}${ext}`);
   },
 });
 
+// Optional: only allow images
+const fileFilter = (req, file, cb) => {
+  const allowed = ["image/jpeg", "image/png", "image/webp", "image/jpg"];
+  if (allowed.includes(file.mimetype)) return cb(null, true);
+  cb(new Error("Only image files are allowed (jpg, jpeg, png, webp)."));
+};
+
 const upload = multer({
-  storage: storage,
-});
-// Banner post
-app.post('/bannerUpload', upload.single('bannerImage'), (req, res) => {
-  const bannerImage = req.file.filename;
-  const title = req.body.title;
-
-  const sql = "INSERT INTO banner (title, bannerImage) VALUES (?, ?)";
-  const values = [title, bannerImage];
-
-  pool.query(sql, values, (err, result) => {
-    if (err) {
-      console.log(err);
-      res.status(500).send("Error inserting values");
-    } else {
-      res.send("Values inserted");
-    }
-  });
+  storage,
+  fileFilter,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
 });
 
+// -------------------- Routes --------------------
 
-app.post('/projectUpload', upload.fields([
-  { name: 'mainImage', maxCount: 1 },
-  { name: 'subImage1', maxCount: 1 },
-  { name: 'subImage2', maxCount: 1 },
-  { name: 'subImage3', maxCount: 1 },
-]), async (req, res) => {
-  const {
-    address,
-    name,
-    status,
-    landArea,
-    noOfFloors,
-    apartmentFloor,
-    apartmentSize,
-    bedroom,
-    bathroom,
-    launchDate,
-    collection,
-    extraData
-  } = req.body;
+// ---------- Banner ----------
 
-  const mainImage = req.files['mainImage'][0].filename;
-  const subImage1 = req.files['subImage1'][0].filename;
-  const subImage2 = req.files['subImage2'][0].filename;
-  const subImage3 = req.files['subImage3'][0].filename;
-
-  const sql = 'INSERT INTO projects (address, name, status, landArea, noOfFloors, apartmentFloor, apartmentSize, bedroom, bathroom, launchDate, collection, extraData, mainImage, subImage1, subImage2, subImage3) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
-  const values = [
-    address,
-    name,
-    status,
-    landArea,
-    noOfFloors,
-    apartmentFloor,
-    apartmentSize,
-    bedroom,
-    bathroom,
-    launchDate,
-    collection,
-    extraData,
-    mainImage,
-    subImage1,
-    subImage2,
-    subImage3
-  ];
-
+// Create banner
+app.post("/bannerUpload", upload.single("bannerImage"), async (req, res) => {
   try {
-    await pool.query(sql, values);
-    res.status(200).send('Values inserted');
-  } catch (error) {
-    console.error(error);
-    res.status(500).send('Error inserting values');
+    const bannerImage = req.file?.filename || null;
+    const title = req.body.title ?? null;
+
+    const sql = "INSERT INTO banner (title, bannerImage) VALUES (?, ?)";
+    await pool.query(sql, [title, bannerImage]);
+
+    res.status(200).send("Values inserted");
+  } catch (err) {
+    await deleteUploadedFilesFromReq(req);
+    console.error(err);
+    res.status(500).send("Error inserting values");
   }
 });
 
-
-
-app.get('/getAllData', (req, res) => {
-  const sql = "SELECT * FROM banner";
-
-  pool.query(sql, (err, results) => {
-    if (err) {
-      console.log(err);
-      res.status(500).send("Error fetching data");
-    } else {
-      res.json(results);
-    }
-  });
+// Get all banners
+app.get("/getAllData", async (req, res) => {
+  try {
+    const [rows] = await pool.query("SELECT * FROM banner");
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Error fetching data");
+  }
 });
 
-//single banner by ID
-app.get('/getByProjectId/:id', (req, res) => {
-  const projectId = req.params.id;
-  const sql = "SELECT * FROM projects WHERE id = ?";
-
-  pool.query(sql, [projectId], (err, result) => {
-    if (err) {
-      console.log(err);
-      res.status(500).send("Error fetching data");
-    } else {
-      if (result.length === 0) {
-        res.status(404).send("project not found");
-      } else {
-        res.json(result[0]); // Assuming you want to return the first (and only) result
-      }
-    }
-  });
+// Get banner by id
+app.get("/getDataById/:id", async (req, res) => {
+  try {
+    const bannerId = req.params.id;
+    const [rows] = await pool.query("SELECT * FROM banner WHERE id = ?", [bannerId]);
+    if (!rows.length) return res.status(404).send("Banner not found");
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Error fetching data");
+  }
 });
-app.get('/getDataById/:id', (req, res) => {
+
+// Update banner (replace image if new uploaded)
+app.patch("/updateBanner/:id", upload.single("bannerImage"), async (req, res) => {
   const bannerId = req.params.id;
-  const sql = "SELECT * FROM banner WHERE id = ?";
-
-  pool.query(sql, [bannerId], (err, result) => {
-    if (err) {
-      console.log(err);
-      res.status(500).send("Error fetching data");
-    } else {
-      if (result.length === 0) {
-        res.status(404).send("Banner not found");
-      } else {
-        res.json(result[0]); // Assuming you want to return the first (and only) result
-      }
-    }
-  });
-});
-
-// delete banner 
-app.delete('/deleteBanner/:id', async (req, res) => {
-  const bannerId = req.params.id;
-
-  const getBannerSql = "SELECT * FROM banner WHERE id = ?";
-  const getBannerValues = [bannerId];
-
-  pool.query(getBannerSql, getBannerValues, async (err, results) => {
-    if (err) {
-      console.log(err);
-      res.status(500).send("Error fetching banner data");
-    } else {
-      const banner = results[0];
-      if (!banner) {
-        return res.status(404).send("Banner not found");
-      }
-
-      const imagePath = path.join(__dirname, 'im/images', banner.bannerImage);
-
-      try {
-        await fs.access(imagePath);
-        await fs.unlink(imagePath);
-      } catch (unlinkError) {
-        console.error("Error deleting image file:", unlinkError);
-        res.status(500).send("Error deleting image file");
-        return;
-      }
-
-      const deleteBannerSql = "DELETE FROM banner WHERE id = ?";
-      const deleteBannerValues = [bannerId];
-
-      pool.query(deleteBannerSql, deleteBannerValues, (deleteError, deleteResult) => {
-        if (deleteError) {
-          console.log(deleteError);
-          res.status(500).send("Error deleting banner");
-        } else {
-          res.send("Banner and image deleted");
-        }
-      });
-    }
-  });
-});
-
-
-app.delete('/deleteProject/:id', async (req, res) => {
-  const projectId = req.params.id;
-  const getProductSql = 'SELECT * FROM projects WHERE id = ?';
-  const getProductValues = [projectId];
-
-  pool.query(getProductSql, getProductValues, async (err, results) => {
-    if (err) {
-      console.log(err);
-      res.status(500).send('Error fetching project data');
-    } else {
-      const project = results[0];
-      if (!project) {
-        return res.status(404).send('Project not found');
-      }
-
-      const imagePath = path.join(
-        __dirname,
-        'im/images',
-        project.mainImage,
-      );
-
-      try {
-        // Check if the main image exists before attempting to delete
-        await fs.access(imagePath);
-        await fs.unlink(imagePath);
-
-        // Repeat the process for each subImage
-        const subImagePaths = [
-          project.subImage1,
-          project.subImage2,
-          project.subImage3,
-        ];
-
-        subImagePaths.forEach(async (subImage) => {
-          const subImagePath = path.join(
-            __dirname,
-            'im/images',
-            subImage,
-          );
-
-          try {
-            await fs.access(subImagePath);
-            await fs.unlink(subImagePath);
-          } catch (subImageUnlinkError) {
-            console.error('Error deleting subImage file:', subImageUnlinkError);
-          }
-        });
-      } catch (unlinkError) {
-        console.error('Error deleting image file:', unlinkError);
-        res.status(500).send('Error deleting image file');
-        return;
-      }
-
-      const deleteProjectSql = 'DELETE FROM projects WHERE id = ?';
-      const deleteProjectValues = [projectId];
-
-      pool.query(deleteProjectSql, deleteProjectValues, (deleteError, deleteResult) => {
-        if (deleteError) {
-          console.log(deleteError);
-          res.status(500).send('Error deleting project');
-        } else {
-          res.send('Project and image deleted');
-        }
-      });
-    }
-  });
-});
-
-// update banner
-app.patch('/updateBanner/:id', upload.single('bannerImage'), async (req, res) => {
-  const bannerId = req.params.id;
-  const { title } = req.body;
+  const title = req.body.title;
   const newBannerImage = req.file?.filename;
 
-  console.log("Received request to update banner:", req.body, req.file, bannerId);
+  let oldImageToDelete = null;
 
-  // Get the existing banner data
-  const getBannerSql = 'SELECT * FROM banner WHERE id = ?';
-  const getBannerValues = [bannerId];
+  try {
+    const [rows] = await pool.query("SELECT * FROM banner WHERE id = ?", [bannerId]);
+    const existing = rows[0];
+    if (!existing) {
+      await deleteUploadedFilesFromReq(req);
+      return res.status(404).send("Banner not found");
+    }
 
-  pool.query(getBannerSql, getBannerValues, async (err, results) => {
-    if (err) {
-      console.log(err);
-      res.status(500).send("Error fetching banner data");
-    } else {
-      const existingBanner = results[0];
-      if (!existingBanner) {
-        return res.status(404).send("Banner not found");
+    const setClause = [];
+    const values = [];
+
+    if (title !== undefined) {
+      setClause.push("title = ?");
+      values.push(title);
+    }
+
+    if (newBannerImage) {
+      setClause.push("bannerImage = ?");
+      values.push(newBannerImage);
+      oldImageToDelete = existing.bannerImage || null;
+    }
+
+    if (!setClause.length) {
+      await deleteUploadedFilesFromReq(req);
+      return res.status(400).send("No fields to update");
+    }
+
+    values.push(bannerId);
+    const sql = `UPDATE banner SET ${setClause.join(", ")} WHERE id = ?`;
+    await pool.query(sql, values);
+
+    // delete old image AFTER DB update success
+    if (oldImageToDelete) {
+      await safeUnlink(path.join(IMAGES_DIR, oldImageToDelete));
+    }
+
+    res.send("Banner updated");
+  } catch (err) {
+    // if update fails, remove newly uploaded file
+    await deleteUploadedFilesFromReq(req);
+    console.error(err);
+    res.status(500).send("Error updating banner");
+  }
+});
+
+// Delete banner (+ delete image)
+app.delete("/deleteBanner/:id", async (req, res) => {
+  try {
+    const bannerId = req.params.id;
+    const [rows] = await pool.query("SELECT * FROM banner WHERE id = ?", [bannerId]);
+    const banner = rows[0];
+    if (!banner) return res.status(404).send("Banner not found");
+
+    // delete from DB first
+    await pool.query("DELETE FROM banner WHERE id = ?", [bannerId]);
+
+    // then delete file
+    if (banner.bannerImage) {
+      await safeUnlink(path.join(IMAGES_DIR, banner.bannerImage));
+    }
+
+    res.send("Banner and image deleted");
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Error deleting banner");
+  }
+});
+
+// ---------- Projects (Products) ----------
+
+// Create project
+app.post(
+  "/projectUpload",
+  upload.fields([
+    { name: "mainImage", maxCount: 1 },
+    { name: "subImage1", maxCount: 1 },
+    { name: "subImage2", maxCount: 1 },
+    { name: "subImage3", maxCount: 1 },
+  ]),
+  async (req, res) => {
+    try {
+      const {
+        address,
+        name,
+        status,
+        landArea,
+        noOfFloors,
+        apartmentFloor,
+        apartmentSize,
+        bedroom,
+        bathroom,
+        launchDate,
+        collection,
+        extraData,
+      } = req.body;
+
+      const mainImage = req.files?.mainImage?.[0]?.filename || null;
+      const subImage1 = req.files?.subImage1?.[0]?.filename || null;
+      const subImage2 = req.files?.subImage2?.[0]?.filename || null;
+      const subImage3 = req.files?.subImage3?.[0]?.filename || null;
+
+      const sql = `
+        INSERT INTO projects
+        (address, name, status, landArea, noOfFloors, apartmentFloor, apartmentSize, bedroom, bathroom, launchDate, collection, extraData, mainImage, subImage1, subImage2, subImage3)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `;
+
+      const values = [
+        address ?? null,
+        name ?? null,
+        status ?? null,
+        landArea ?? null,
+        noOfFloors ?? null,
+        apartmentFloor ?? null,
+        apartmentSize ?? null,
+        bedroom ?? null,
+        bathroom ?? null,
+        launchDate ?? null,
+        collection ?? null,
+        extraData ?? null,
+        mainImage,
+        subImage1,
+        subImage2,
+        subImage3,
+      ];
+
+      await pool.query(sql, values);
+      res.status(200).send("Values inserted");
+    } catch (err) {
+      await deleteUploadedFilesFromReq(req);
+      console.error(err);
+      res.status(500).send("Error inserting values");
+    }
+  }
+);
+
+// Get all projects
+app.get("/products", async (req, res) => {
+  try {
+    const [rows] = await pool.query("SELECT * FROM projects");
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Error Fetching Data");
+  }
+});
+
+// Get single project by id
+app.get("/getByProjectId/:id", async (req, res) => {
+  try {
+    const projectId = req.params.id;
+    const [rows] = await pool.query("SELECT * FROM projects WHERE id = ?", [projectId]);
+    if (!rows.length) return res.status(404).send("project not found");
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Error fetching data");
+  }
+});
+
+// Update project (replace only updated images, delete old ones)
+app.patch(
+  "/updateProduct/:id",
+  upload.fields([
+    { name: "mainImage", maxCount: 1 },
+    { name: "subImage1", maxCount: 1 },
+    { name: "subImage2", maxCount: 1 },
+    { name: "subImage3", maxCount: 1 },
+  ]),
+  async (req, res) => {
+    const productId = req.params.id;
+
+    const newMain = req.files?.mainImage?.[0]?.filename || null;
+    const newSub1 = req.files?.subImage1?.[0]?.filename || null;
+    const newSub2 = req.files?.subImage2?.[0]?.filename || null;
+    const newSub3 = req.files?.subImage3?.[0]?.filename || null;
+
+    const fields = req.body;
+
+    let oldToDelete = []; // old image names to delete AFTER DB update
+
+    try {
+      const [rows] = await pool.query("SELECT * FROM projects WHERE id = ?", [productId]);
+      const existing = rows[0];
+      if (!existing) {
+        await deleteUploadedFilesFromReq(req);
+        return res.status(404).send("Product Not found");
       }
 
-      const existingImage = existingBanner.bannerImage;
+      const setClause = [];
+      const values = [];
 
-      // If a new image is provided, delete the existing image
-      if (newBannerImage && existingImage) {
-        const imagePath = path.join(__dirname, 'im/images', existingImage);
-        try {
-          await fs.unlink(imagePath);
-        } catch (unlinkError) {
-          console.error("Error deleting existing image file:", unlinkError);
-          res.status(500).send("Error deleting existing image file");
-          return;
+      // text fields
+      const allowedTextFields = [
+        "address",
+        "name",
+        "status",
+        "landArea",
+        "noOfFloors",
+        "apartmentFloor",
+        "apartmentSize",
+        "bedroom",
+        "bathroom",
+        "launchDate",
+        "collection",
+        "extraData",
+      ];
+
+      for (const key of allowedTextFields) {
+        if (fields[key] !== undefined) {
+          setClause.push(`${key} = ?`);
+          values.push(fields[key]);
         }
       }
 
-      // Update the banner data
-      const setClause = [];
-      if (title) setClause.push('title = ?');
-      if (newBannerImage) setClause.push('bannerImage = ?');
+      // image fields (replace)
+      if (newMain) {
+        setClause.push("mainImage = ?");
+        values.push(newMain);
+        if (existing.mainImage) oldToDelete.push(existing.mainImage);
+      }
+      if (newSub1) {
+        setClause.push("subImage1 = ?");
+        values.push(newSub1);
+        if (existing.subImage1) oldToDelete.push(existing.subImage1);
+      }
+      if (newSub2) {
+        setClause.push("subImage2 = ?");
+        values.push(newSub2);
+        if (existing.subImage2) oldToDelete.push(existing.subImage2);
+      }
+      if (newSub3) {
+        setClause.push("subImage3 = ?");
+        values.push(newSub3);
+        if (existing.subImage3) oldToDelete.push(existing.subImage3);
+      }
 
-      if (setClause.length === 0) {
+      if (!setClause.length) {
+        await deleteUploadedFilesFromReq(req);
         return res.status(400).send("No fields to update");
       }
 
-      const updateSql = `UPDATE banner SET ${setClause.join(', ')} WHERE id = ?`;
-      const updateValues = [
-        ...(title ? [title] : []),
-        ...(newBannerImage ? [newBannerImage] : []),
-        bannerId,
-      ];
+      values.push(productId);
+      const sql = `UPDATE projects SET ${setClause.join(", ")} WHERE id = ?`;
+      await pool.query(sql, values);
 
-      pool.query(updateSql, updateValues, (updateErr, updateResult) => {
-        if (updateErr) {
-          console.log(updateErr);
-          res.status(500).send("Error updating banner");
-        } else {
-          res.send("Banner updated");
-        }
-      });
+      // delete old images after successful update
+      await safeUnlinkMany(oldToDelete);
+
+      res.send("Product updated");
+    } catch (err) {
+      // if update fails, remove newly uploaded files
+      await deleteUploadedFilesFromReq(req);
+      console.error(err);
+      res.status(500).send("Error updating product");
     }
-  });
-});
+  }
+);
 
-app.patch('/updateProduct/:id', upload.fields([
-  { name: 'mainImage', maxCount: 1 },
-  { name: 'subImage1', maxCount: 1 },
-  { name: 'subImage2', maxCount: 1 },
-  { name: 'subImage3', maxCount: 1 },
-]), async (req, res) => {
+// Delete project (+ delete all images)
+app.delete("/deleteProject/:id", async (req, res) => {
   try {
-    const productId = req.params.id;
-    const {
-      address, name, status, landArea, noOfFloors, apartmentFloor, apartmentSize, bedroom, bathroom, launchDate, collection, extraData
-    } = req.body;
-    
-    const mainImage = req.files && req.files['mainImage'] ? req.files['mainImage'][0].filename : null;
-    const subImage1 = req.files && req.files['subImage1'] ? req.files['subImage1'][0].filename : null;
-    const subImage2 = req.files && req.files['subImage2'] ? req.files['subImage2'][0].filename : null;
-    const subImage3 = req.files && req.files['subImage3'] ? req.files['subImage3'][0].filename : null;
+    const projectId = req.params.id;
 
-    console.log("Received request to update product:", req.body, req.files, productId);
+    const [rows] = await pool.query("SELECT * FROM projects WHERE id = ?", [projectId]);
+    const project = rows[0];
+    if (!project) return res.status(404).send("Project not found");
 
-    const getProductSql = 'SELECT * FROM projects WHERE id = ?';
-    const getProductValues = [productId];
-    pool.query(getProductSql, getProductValues, async (err, results) => {
-      if (err) {
-        console.log(err);
-        res.status(500).send("Error fetching product data");
-      } else {
-        const existingProduct = results[0];
-        if (!existingProduct) {
-          return res.status(404).send('Product Not found');
-        }
-        const existingMainImage = existingProduct.mainImage;
+    // delete from DB first
+    await pool.query("DELETE FROM projects WHERE id = ?", [projectId]);
 
-        if (mainImage && existingMainImage) {
-          const imagePath = path.join(__dirname, 'im/images', existingMainImage);
-          try {
-            await fs.unlink(imagePath);
-          } catch (unlinkError) {
-            console.error("Error deleting existing main image file : ", unlinkError);
-            res.status(500).send("Error deleting existing main image file");
-            return;
-          }
-        }
+    // then delete files
+    await safeUnlinkMany([project.mainImage, project.subImage1, project.subImage2, project.subImage3]);
 
-        const setClause = [];
-        if (address) setClause.push('address = ?');
-        if (name) setClause.push('name = ?');
-        // Add other fields to the setClause...
-// Add other fields to the setClause...
-if (status) setClause.push('status = ?');
-if (landArea) setClause.push('landArea = ?');
-if (noOfFloors) setClause.push('noOfFloors = ?');
-if (apartmentFloor) setClause.push('apartmentFloor = ?');
-if (apartmentSize) setClause.push('apartmentSize = ?');
-if (bedroom) setClause.push('bedroom = ?');
-if (bathroom) setClause.push('bathroom = ?');
-if (launchDate) setClause.push('launchDate = ?');
-if (collection) setClause.push('collection = ?');
-if (extraData) setClause.push('extraData = ?');
-        if (mainImage) setClause.push('mainImage = ?');
-        if (subImage1) setClause.push('subImage1 = ?');
-        if (subImage2) setClause.push('subImage2 = ?');
-        if (subImage3) setClause.push('subImage3 = ?');
-
-        if (setClause.length === 0) {
-          return res.status(400).send("No fields to update");
-        }
-
-        const updateSql = `UPDATE projects SET ${setClause.join(', ')} WHERE id = ?`;
-        const updateValues = [
-          ...(name ? [name] : []),
-          ...(address ? [address] : []),
-          // Add other values to the updateValues...
-          ...(status ? [status] : []),
-...(landArea ? [landArea] : []),
-...(noOfFloors ? [noOfFloors] : []),
-...(apartmentFloor ? [apartmentFloor] : []),
-...(apartmentSize ? [apartmentSize] : []),
-...(bedroom ? [bedroom] : []),
-...(bathroom ? [bathroom] : []),
-...(launchDate ? [launchDate] : []),
-...(collection ? [collection] : []),
-...(extraData ? [extraData] : []),
-          ...(mainImage ? [mainImage] : []),
-          ...(subImage1 ? [subImage1] : []),
-          ...(subImage2 ? [subImage2] : []),
-          ...(subImage3 ? [subImage3] : []),
-          productId,
-        ];
-
-        pool.query(updateSql, updateValues, (updateErr, updateResult) => {
-          if (updateErr) {
-            console.log(updateErr);
-            res.status(500).send("Error updating product");
-          } else {
-            res.send("Product updated");
-          }
-        });
-      }
-    });
-  } catch (error) {
-    console.error("Error updating product:", error);
-    res.status(500).send("Error updating product");
+    res.send("Project and image deleted");
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Error deleting project");
   }
 });
 
-
-
-// get witness
-app.get('/witness', (req,res) =>{
-  const sql = "SELECT * FROM witness";
-  pool.query(sql,(err,results) =>{
-    if(err){
-      console.log(err);
-      res.status(500).send("Error fetching data");
-    }
-    else{
-      res.json(results)
-    }
-  })
-})
-
-// update witness
-app.patch('/updateWitness/:id', upload.single('witnessTitle'), (req, res) =>{
-const witnessId = req.params.id;
-const {witnessTitle} = req.body;
-const {witnessPara} = req.body;
-const setClause =[];
-if(witnessTitle) setClause.push('witnessTitle = ?');
-if(witnessPara) setClause.push('witnessPara = ?');
-if(setClause.length === 0) {
-  return res.status(400).send("No fields to update");
-}
-
-const sql =  `UPDATE witness SET ${setClause.join(', ')}  WHERE id = ?`;
-const values = [...(witnessTitle ? [witnessTitle] : []), ...(witnessPara ? [witnessPara] : []), witnessId];
-
-pool.query(sql, values, (err, result) =>{
-  if(err){
-    console.log(err)
-    res.status(500).send("Error updating witness")
-  } else{
-    res.send("Witness Updated")
+// ---------- Witness ----------
+app.get("/witness", async (req, res) => {
+  try {
+    const [rows] = await pool.query("SELECT * FROM witness");
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Error fetching data");
   }
-})
-})
-// get landWanted
-app.get('/landWanted', (req,res) =>{
-  const sql = 'SELECT * FROM landwanted';
-  pool.query(sql,(err, result) =>{
-    if(err){
-      console.log(err)
-      res.status(500).send("Error Fetching Data")
-    }
-    else{
-      res.json(result)
-    }
-  } )
-})
+});
 
-// update landWanted
-app.patch('/landUpdate/:id', upload.single('landImage'), async (req, res) => {
+app.patch("/updateWitness/:id", async (req, res) => {
+  try {
+    const witnessId = req.params.id;
+    const { witnessTitle, witnessPara } = req.body;
+
+    const setClause = [];
+    const values = [];
+
+    if (witnessTitle !== undefined) {
+      setClause.push("witnessTitle = ?");
+      values.push(witnessTitle);
+    }
+    if (witnessPara !== undefined) {
+      setClause.push("witnessPara = ?");
+      values.push(witnessPara);
+    }
+
+    if (!setClause.length) return res.status(400).send("No fields to update");
+
+    values.push(witnessId);
+    await pool.query(`UPDATE witness SET ${setClause.join(", ")} WHERE id = ?`, values);
+
+    res.send("Witness Updated");
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Error updating witness");
+  }
+});
+
+// ---------- LandWanted ----------
+app.get("/landWanted", async (req, res) => {
+  try {
+    const [rows] = await pool.query("SELECT * FROM landwanted");
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Error Fetching Data");
+  }
+});
+
+app.patch("/landUpdate/:id", upload.single("landImage"), async (req, res) => {
   const landId = req.params.id;
   const { landWantedTitle, landWantedSubtitle, landWantedPara, phNumber } = req.body;
   const newLandImage = req.file?.filename;
-  console.log("Received request to update land:", req.body, req.file, landId);
 
-  // Get the existing land data
-  const getLandSql = 'SELECT * FROM landwanted WHERE id = ?';
-  const getLandValues = [landId];
+  let oldToDelete = null;
 
-  pool.query(getLandSql, getLandValues, async (err, results) => {
-    if (err) {
-      console.log(err);
-      res.status(500).send("Error fetching land data");
-    } else {
-      const existingLand = results[0];
-      if (!existingLand) {
-        return res.status(404).send("Land not found");
-      }
-
-      const existingImage = existingLand.landImage;
-
-      // If a new image is provided, delete the existing image
-      if (newLandImage && existingImage) {
-        const imagePath = path.join(__dirname, 'im/images', existingImage);
-        try {
-          await fs.unlink(imagePath);
-        } catch (unlinkError) {
-          console.error("Error deleting existing image file:", unlinkError);
-          res.status(500).send("Error deleting existing image file");
-          return;
-        }
-      }
-
-      // Update the land data
-      const setClause = [];
-      if (landWantedTitle) setClause.push('landWantedTitle = ?');
-      if (landWantedSubtitle) setClause.push('landWantedSubtitle = ?');
-      if (landWantedPara) setClause.push('landWantedPara = ?');
-      if (phNumber) setClause.push('phNumber = ?');
-      if (newLandImage) setClause.push('landImage = ?');
-
-      if (setClause.length === 0) {
-        return res.status(400).send("No Fields to update");
-      }
-
-      const updateSql = `UPDATE landwanted SET ${setClause.join(', ')} WHERE id = ?`;
-      const updateValues = [
-        ...(landWantedTitle ? [landWantedTitle] : []),
-        ...(landWantedSubtitle ? [landWantedSubtitle] : []),
-        ...(landWantedPara ? [landWantedPara] : []),
-        ...(phNumber ? [phNumber] : []),
-        ...(newLandImage ? [newLandImage] : []),
-        landId,
-      ];
-
-      pool.query(updateSql, updateValues, (updateErr, updateResults) => {
-        if (updateErr) {
-          console.log(updateErr);
-          res.status(500).send("Error updating land");
-        } else {
-          res.send("Land Wanted Update");
-        }
-      });
-    }
-  });
-});
-
-
-//get luxury
-app.get('/luxury', (req,res) =>{
-  const sql = 'SELECT * FROM luxury';
-  pool.query(sql, (err, result) =>{
-    if(err){
-      console.log(err)
-      res.status(500).send("Error Fetching Data")
-    }
-    else{
-      res.json(result)
-    }
-  })
-})
-
-
-app.post('/login', (req, res) => {
-  const { email, password } = req.body;
-  const sql = "SELECT * FROM login WHERE username = ? AND password = ?";
-
-  pool.query(sql, [email, password], (err, data) => {
-    if (err) {
-      console.log(err);
-      return res.status(500).json({ error: 'Internal Server Error' });
+  try {
+    const [rows] = await pool.query("SELECT * FROM landwanted WHERE id = ?", [landId]);
+    const existing = rows[0];
+    if (!existing) {
+      await deleteUploadedFilesFromReq(req);
+      return res.status(404).send("Land not found");
     }
 
-    if (data.length === 0) {
-      // No matching user found (invalid credentials)
-      return res.status(401).json({ error: 'Invalid credentials' });
+    const setClause = [];
+    const values = [];
+
+    if (landWantedTitle !== undefined) {
+      setClause.push("landWantedTitle = ?");
+      values.push(landWantedTitle);
+    }
+    if (landWantedSubtitle !== undefined) {
+      setClause.push("landWantedSubtitle = ?");
+      values.push(landWantedSubtitle);
+    }
+    if (landWantedPara !== undefined) {
+      setClause.push("landWantedPara = ?");
+      values.push(landWantedPara);
+    }
+    if (phNumber !== undefined) {
+      setClause.push("phNumber = ?");
+      values.push(phNumber);
+    }
+    if (newLandImage) {
+      setClause.push("landImage = ?");
+      values.push(newLandImage);
+      oldToDelete = existing.landImage || null;
     }
 
-    if (req.session) {
-      // Check if the 'data' array is not empty before accessing its elements
-      if (data[0] && data[0].username) {
-        req.session.user = { email: data[0].username };
-        return res.json({ message: "Login Successfully", user: req.session.user });
-      } else {
-        console.error("Invalid user data in the database");
-        return res.status(500).json({ error: 'Internal Server Error' });
-      }
-    } else {
-      console.error("Session not initialized");
-      return res.status(500).json({ error: 'Internal Server Error' });
+    if (!setClause.length) {
+      await deleteUploadedFilesFromReq(req);
+      return res.status(400).send("No Fields to update");
     }
-  });
-});
 
-// Add a logout route
-app.post('/logout', (req, res) => {
-  if (req.session) {
-    req.session.destroy((err) => {
-      if (err) {
-        console.error(err);
-        return res.status(500).json({ error: 'Internal Server Error' });
-      }
-      return res.json({ message: 'Logout Successful' });
-    });
-  } else {
-    console.error("Session not initialized");
-    return res.status(500).json({ error: 'Internal Server Error' });
+    values.push(landId);
+    await pool.query(`UPDATE landwanted SET ${setClause.join(", ")} WHERE id = ?`, values);
+
+    if (oldToDelete) await safeUnlink(path.join(IMAGES_DIR, oldToDelete));
+
+    res.send("Land Wanted Update");
+  } catch (err) {
+    await deleteUploadedFilesFromReq(req);
+    console.error(err);
+    res.status(500).send("Error updating land");
   }
 });
 
-app.patch('/luxuryUpdate/:id', upload.single('luxuryImage'), async (req, res) => {
+// ---------- Luxury ----------
+app.get("/luxury", async (req, res) => {
+  try {
+    const [rows] = await pool.query("SELECT * FROM luxury");
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Error Fetching Data");
+  }
+});
+
+app.patch("/luxuryUpdate/:id", upload.single("luxuryImage"), async (req, res) => {
   const luxuryId = req.params.id;
   const { youtubeLink } = req.body;
   const newLuxuryImage = req.file?.filename;
 
-  console.log("Received request to update luxury:", req.body, req.file, luxuryId);
+  let oldToDelete = null;
 
-  const getLuxurySql = 'SELECT * FROM luxury WHERE id = ?';
-  const getLuxuryValues = [luxuryId];
-
-  pool.query(getLuxurySql, getLuxuryValues, async (err, results) => {
-    if (err) {
-      console.log(err);
-      res.status(500).send("Error fetching luxury data");
-    } else {
-      const existingLuxury = results[0];
-      if (!existingLuxury) {
-        return res.status(404).send("Luxury not found");
-      }
-      const existingImage = existingLuxury.luxuryImage;
-      if (newLuxuryImage && existingImage) {
-        const imagePath = path.join(__dirname, 'im/images', existingImage);
-        try {
-          await fs.unlink(imagePath);
-        } catch (unlinkError) {
-          console.error("Error deleting existing image file:", unlinkError);
-          res.status(500).send("Error deleting existing image file");
-          return;
-        }
-      }
-
-      const setClause = [];
-      if (youtubeLink) setClause.push('youtubeLink = ?');
-      if (newLuxuryImage) setClause.push('luxuryImage = ?');
-
-      if (setClause.length === 0) {
-        return res.status(400).send("No Fields to update");
-      }
-
-      const updateSql = `UPDATE luxury SET ${setClause.join(', ')} WHERE id = ?`;
-      const updateValues = [
-        ...(youtubeLink ? [youtubeLink] : []),
-        ...(newLuxuryImage ? [newLuxuryImage] : []),
-        luxuryId,
-      ];
-
-      pool.query(updateSql, updateValues, (updateErr, updateResults) => {
-        if (updateErr) {
-          console.log(updateErr);
-          res.status(500).send("Error updating luxury");
-        } else {
-          res.send("Luxury Update");
-        }
-      });
+  try {
+    const [rows] = await pool.query("SELECT * FROM luxury WHERE id = ?", [luxuryId]);
+    const existing = rows[0];
+    if (!existing) {
+      await deleteUploadedFilesFromReq(req);
+      return res.status(404).send("Luxury not found");
     }
-  });
+
+    const setClause = [];
+    const values = [];
+
+    if (youtubeLink !== undefined) {
+      setClause.push("youtubeLink = ?");
+      values.push(youtubeLink);
+    }
+    if (newLuxuryImage) {
+      setClause.push("luxuryImage = ?");
+      values.push(newLuxuryImage);
+      oldToDelete = existing.luxuryImage || null;
+    }
+
+    if (!setClause.length) {
+      await deleteUploadedFilesFromReq(req);
+      return res.status(400).send("No Fields to update");
+    }
+
+    values.push(luxuryId);
+    await pool.query(`UPDATE luxury SET ${setClause.join(", ")} WHERE id = ?`, values);
+
+    if (oldToDelete) await safeUnlink(path.join(IMAGES_DIR, oldToDelete));
+
+    res.send("Luxury Update");
+  } catch (err) {
+    await deleteUploadedFilesFromReq(req);
+    console.error(err);
+    res.status(500).send("Error updating luxury");
+  }
 });
-app.get('/metro', (req, res) =>{
-  const sql = 'SELECT * FROM metro';
-  pool.query(sql,(err, result) =>{
-    if(err) {
-      console.log(err)
-      res.status(500).send("Error Fetching Data ")
-    }
-    else{
-      res.json(result)
-    }
-  })
-})
-app.patch('/metroUpdate/:id', upload.single('metroImage'), async(req, res) =>{
+
+// ---------- Metro ----------
+app.get("/metro", async (req, res) => {
+  try {
+    const [rows] = await pool.query("SELECT * FROM metro");
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Error Fetching Data");
+  }
+});
+
+app.patch("/metroUpdate/:id", upload.single("metroImage"), async (req, res) => {
   const metroId = req.params.id;
-  const {metroPara} = req.body;
+  const { metroPara } = req.body;
   const newMetroImage = req.file?.filename;
 
-  console.log("Received request to update metro :", req.body, req.file, metroId);
-  const getMetroSql = 'SELECT * FROM metro WHERE id = ?';
-  const getMetroValues = [metroId]
-   
-  pool.query(getMetroSql, getMetroValues, async(err, results) =>{
-if(err){
-  console.log(err)
-  res.status(500).send('Error fetching metro data')
-}else{
-  const existingMetro = results[0];
-  if(!existingMetro){
-    return res.status(404).send("metro not found")
-  }
+  let oldToDelete = null;
 
-  const existingImage = existingMetro.metroImage;
-  if(newMetroImage && existingImage){
-    const imagePath = path.join(__dirname, 'im/images', existingImage);
-    try{
-      await fs.unlink(imagePath);
-
-    }catch(error){
-      console.log('Error deleting existing image file : ', unLinkError);
-      res.status(500).send("Error deleting existing image file");
-      return;
+  try {
+    const [rows] = await pool.query("SELECT * FROM metro WHERE id = ?", [metroId]);
+    const existing = rows[0];
+    if (!existing) {
+      await deleteUploadedFilesFromReq(req);
+      return res.status(404).send("metro not found");
     }
-  }
-  const setClause = [];
-  if(metroPara) setClause.push('metroPara = ?');
-  if(newMetroImage) setClause.push('metroImage = ?');
-   
-  if(setClause.length === 0) {
-    return res.status(400).send("No Fields to update");
-  };
-  const updateSql =  `UPDATE  metro SET ${setClause.join (', ') }   WHERE id = ?`;
-  const updateValues = [
-    ...(metroPara ? [metroPara] : []),
-    ...(newMetroImage ? [newMetroImage] : []),
-    metroId
-  ]
 
-  pool.query(updateSql, updateValues, (updateErr, updateResult) =>{
-    if(updateErr) {
-      console.log(updateErr)
-      res.status(500).send("Error updating metro")
-    } else{
-      res.send("metro update++_")
+    const setClause = [];
+    const values = [];
+
+    if (metroPara !== undefined) {
+      setClause.push("metroPara = ?");
+      values.push(metroPara);
     }
-  })
-}
-  })
+    if (newMetroImage) {
+      setClause.push("metroImage = ?");
+      values.push(newMetroImage);
+      oldToDelete = existing.metroImage || null;
+    }
+
+    if (!setClause.length) {
+      await deleteUploadedFilesFromReq(req);
+      return res.status(400).send("No Fields to update");
+    }
+
+    values.push(metroId);
+    await pool.query(`UPDATE metro SET ${setClause.join(", ")} WHERE id = ?`, values);
+
+    if (oldToDelete) await safeUnlink(path.join(IMAGES_DIR, oldToDelete));
+
+    res.send("metro updated");
+  } catch (err) {
+    await deleteUploadedFilesFromReq(req);
+    console.error(err);
+    res.status(500).send("Error updating metro");
+  }
 });
-//get product
 
-app.get('/products', (req,res) =>{
-  const sql = ' SELECT * FROM projects';
-  pool.query(sql, (err, result) =>{
-    if(err){
-      console.log(err)
-      res.status(500).send("Error Fetching Data")
-    }
-    else{
-      res.json(result)
-    }
-  })
-  })
+// ---------- Auth ----------
+app.post("/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const [rows] = await pool.query(
+      "SELECT * FROM login WHERE username = ? AND password = ?",
+      [email, password]
+    );
 
-app.get('/images/:imageName', (req, res) => {
+    if (!rows.length) return res.status(401).json({ error: "Invalid credentials" });
+
+    req.session.user = { email: rows[0].username };
+    res.json({ message: "Login Successfully", user: req.session.user });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+app.post("/logout", (req, res) => {
+  if (!req.session) return res.status(500).json({ error: "Session not initialized" });
+
+  req.session.destroy((err) => {
+    if (err) return res.status(500).json({ error: "Internal Server Error" });
+    res.json({ message: "Logout Successful" });
+  });
+});
+
+// ---------- Serve images ----------
+app.get("/images/:imageName", (req, res) => {
   const imageName = req.params.imageName;
-  res.sendFile(path.join(__dirname, 'im/images', imageName));
+  res.sendFile(path.join(IMAGES_DIR, imageName));
+});
+
+// ---------- Global error handler (multer fileFilter etc.) ----------
+app.use((err, req, res, next) => {
+  console.error("Global error:", err?.message || err);
+  res.status(400).json({ error: err?.message || "Something went wrong" });
 });
 
 app.listen(port, () => {

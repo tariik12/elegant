@@ -65,8 +65,17 @@ const UploadProject = () => {
         <label className='text-bold uppercase text-[#268EC1] text-start' htmlFor="address">Address</label>
         <input className='w-1/2 border-2  p-1 rounded-md border-black' required type='text' placeholder='Address' {...register('address')} />
         <label className='text-bold uppercase text-[#268EC1] text-start' htmlFor="status">Status</label>
-        <input className='w-1/2 border-2  p-1 rounded-md border-black' required type='text' placeholder='status' {...register('status')} />
-        
+        <select
+  className="w-1/2 border-2 p-2 rounded-md border-black"
+  required
+  defaultValue="Upcoming"
+  {...register("status")}
+>
+  <option value="Ongoing">Ongoing</option>
+  <option value="Upcoming">Upcoming</option>
+  <option value="Completed">Completed</option>
+</select>
+
         <label className='text-bold uppercase text-[#268EC1] text-start' htmlFor="landArea">Land Area</label><input className='w-1/2 border-2  p-1 rounded-md border-black' required type='text' placeholder='Land Area' {...register('landArea')} />
         
         <label className='text-bold uppercase text-[#268EC1] text-start' htmlFor="">No of Floors</label><input className='w-1/2 border-2  p-1 rounded-md border-black' required type='text' placeholder='No of Floors' {...register('noOfFloors')} />
