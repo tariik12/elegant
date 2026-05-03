@@ -7,35 +7,51 @@ import Swal from "sweetalert2";
 const UpdateProject = () => {
   const product = useLoaderData();
   const navigate = useNavigate();
+
   const { register, handleSubmit, reset } = useForm();
 
-  const handleUpdate = async (data, productIdToUpdate) => {
+  const handleUpdate = async (data) => {
     const formData = new FormData();
 
-    // Text fields (only send if user typed something)
-    if (data.newName) formData.append("name", data.newName);
-    if (data.newAddress) formData.append("address", data.newAddress);
-    if (data.newStatus) formData.append("status", data.newStatus);
-    if (data.newLandArea) formData.append("landArea", data.newLandArea);
-    if (data.newNoOfFloors) formData.append("noOfFloors", data.newNoOfFloors);
-    if (data.newApartmentFloor) formData.append("apartmentFloor", data.newApartmentFloor);
-    if (data.newApartmentSize) formData.append("apartmentSize", data.newApartmentSize);
-    if (data.newBedroom) formData.append("bedroom", data.newBedroom);
-    if (data.newBathroom) formData.append("bathroom", data.newBathroom);
-    if (data.newLaunchDate) formData.append("launchDate", data.newLaunchDate);
-    if (data.newCollection) formData.append("collection", data.newCollection);
-    if (data.newExtraData) formData.append("extraData", data.newExtraData);
+    formData.append("name", data.newName);
+    formData.append("address", data.newAddress);
+    formData.append("status", data.newStatus);
+    formData.append("landArea", data.newLandArea);
+    formData.append("noOfFloors", data.newNoOfFloors);
+    formData.append("apartmentFloor", data.newApartmentFloor);
+    formData.append("apartmentSize", data.newApartmentSize);
+    formData.append("bedroom", data.newBedroom);
+    formData.append("bathroom", data.newBathroom);
+    formData.append("launchDate", data.newLaunchDate);
+    formData.append("collection", data.newCollection);
+    formData.append("extraData", data.newExtraData);
 
-    // Files (only if selected)
-    if (data.newMainImage?.[0]) formData.append("mainImage", data.newMainImage[0]);
-    if (data.newSubImage1?.[0]) formData.append("subImage1", data.newSubImage1[0]);
-    if (data.newSubImage2?.[0]) formData.append("subImage2", data.newSubImage2[0]);
-    if (data.newSubImage3?.[0]) formData.append("subImage3", data.newSubImage3[0]);
+    if (data.newMainImage?.[0]) {
+      formData.append("mainImage", data.newMainImage[0]);
+    }
+
+    if (data.newSubImage1?.[0]) {
+      formData.append("subImage1", data.newSubImage1[0]);
+    }
+
+    if (data.newSubImage2?.[0]) {
+      formData.append("subImage2", data.newSubImage2[0]);
+    }
+
+    if (data.newSubImage3?.[0]) {
+      formData.append("subImage3", data.newSubImage3[0]);
+    }
 
     try {
-      await axios.patch(`${import.meta.env.VITE_URL}/updateProduct/${productIdToUpdate}`, formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      await axios.patch(
+        `${import.meta.env.VITE_URL}/updateProduct/${product.id}`,
+        formData,
+        {
+          headers: {
+            "Content-Type": "multipart/form-data",
+          },
+        }
+      );
 
       Swal.fire({
         position: "top-center",
@@ -48,6 +64,8 @@ const UpdateProject = () => {
       reset();
       navigate("/admin-dashboard");
     } catch (error) {
+      console.error("Update error:", error);
+
       Swal.fire({
         position: "top-center",
         icon: "error",
@@ -60,12 +78,11 @@ const UpdateProject = () => {
 
   return (
     <div className="max-w-5xl mx-auto my-10 px-4">
-      <div className=" rounded-2xl shadow p-6">
+      <div className="rounded-2xl shadow p-6">
         <h3 className="text-2xl md:text-3xl font-semibold text-center mb-6">
           Admin Project Update
         </h3>
 
-        {/* current preview */}
         <div className="grid md:grid-cols-2 gap-6 mb-8">
           <div className="rounded-xl overflow-hidden border">
             <img
@@ -74,86 +91,198 @@ const UpdateProject = () => {
               alt="Current Main"
             />
           </div>
+
           <div className="border rounded-xl p-4 text-sm space-y-2">
-            <p><span className="font-semibold">Name:</span> {product?.name}</p>
-            <p><span className="font-semibold">Status:</span> {product?.status}</p>
-            <p><span className="font-semibold">Land Area:</span> {product?.landArea}</p>
-            <p><span className="font-semibold">Launch Date:</span> {product?.launchDate}</p>
-            <p className="text-gray-500">Update only what you need. Blank fields won’t be sent.</p>
+            <p>
+              <span className="font-semibold">Name:</span> {product?.name}
+            </p>
+            <p>
+              <span className="font-semibold">Status:</span> {product?.status}
+            </p>
+            <p>
+              <span className="font-semibold">Land Area:</span>{" "}
+              {product?.landArea}
+            </p>
+            <p>
+              <span className="font-semibold">Launch Date:</span>{" "}
+              {product?.launchDate}
+            </p>
           </div>
         </div>
 
         <form
           className="grid md:grid-cols-2 gap-5"
-          onSubmit={handleSubmit((data) => handleUpdate(data, product.id))}
+          onSubmit={handleSubmit(handleUpdate)}
           encType="multipart/form-data"
         >
-          {/* inputs helper */}
-          {[
-            ["Name", "newName", "text", "e.g. Elegant Sky View"],
-            ["Address", "newAddress", "text", "e.g. Mohammadpur"],
-            ["Land Area", "newLandArea", "text", "e.g. 5 kata"],
-            ["No of Floors", "newNoOfFloors", "text", "e.g. 10"],
-            ["Apartment Floor", "newApartmentFloor", "text", "e.g. 18"],
-            ["Apartment Size", "newApartmentSize", "text", "e.g. 1500-3000 Sft"],
-            ["Bedroom", "newBedroom", "text", "e.g. 3"],
-            ["Bathroom", "newBathroom", "text", "e.g. 4"],
-            ["Launch Date", "newLaunchDate", "date", ""],
-            ["Collection", "newCollection", "text", "e.g. ok"],
-            ["Extra Data", "newExtraData", "text", "e.g. 01-04-26"],
-          ].map(([label, name, type, placeholder]) => (
-            <div key={name} className="flex flex-col gap-2">
-              <label className="text-xs font-semibold uppercase text-slate-600">
-                {label}
-              </label>
-              <input
-                type={type}
-                placeholder={placeholder}
-                className="w-full border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-sky-400"
-                {...register(name)}
-              />
-            </div>
-          ))}
-
-          {/* status dropdown */}
           <div className="flex flex-col gap-2">
-            <label className="text-xs font-semibold uppercase text-slate-600">Status</label>
+            <label>Name</label>
+            <input
+              type="text"
+              defaultValue={product?.name || ""}
+              className="w-full border rounded-lg px-3 py-2"
+              {...register("newName")}
+            />
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <label>Address</label>
+            <input
+              type="text"
+              defaultValue={product?.address || ""}
+              className="w-full border rounded-lg px-3 py-2"
+              {...register("newAddress")}
+            />
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <label>Land Area</label>
+            <input
+              type="text"
+              defaultValue={product?.landArea || ""}
+              className="w-full border rounded-lg px-3 py-2"
+              {...register("newLandArea")}
+            />
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <label>No Of Floors</label>
+            <input
+              type="text"
+              defaultValue={product?.noOfFloors || ""}
+              className="w-full border rounded-lg px-3 py-2"
+              {...register("newNoOfFloors")}
+            />
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <label>Apartment Floor</label>
+            <input
+              type="text"
+              defaultValue={product?.apartmentFloor || ""}
+              className="w-full border rounded-lg px-3 py-2"
+              {...register("newApartmentFloor")}
+            />
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <label>Apartment Size</label>
+            <input
+              type="text"
+              defaultValue={product?.apartmentSize || ""}
+              className="w-full border rounded-lg px-3 py-2"
+              {...register("newApartmentSize")}
+            />
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <label>Bedroom</label>
+            <input
+              type="text"
+              defaultValue={product?.bedroom || ""}
+              className="w-full border rounded-lg px-3 py-2"
+              {...register("newBedroom")}
+            />
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <label>Bathroom</label>
+            <input
+              type="text"
+              defaultValue={product?.bathroom || ""}
+              className="w-full border rounded-lg px-3 py-2"
+              {...register("newBathroom")}
+            />
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <label>Launch Date</label>
+            <input
+              type="date"
+              defaultValue={product?.launchDate || ""}
+              className="w-full border rounded-lg px-3 py-2"
+              {...register("newLaunchDate")}
+            />
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <label>Collection</label>
+            <input
+              type="text"
+              defaultValue={product?.collection || ""}
+              className="w-full border rounded-lg px-3 py-2"
+              {...register("newCollection")}
+            />
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <label>Extra Data</label>
+            <input
+              type="text"
+              defaultValue={product?.extraData || ""}
+              className="w-full border rounded-lg px-3 py-2"
+              {...register("newExtraData")}
+            />
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <label>Status</label>
             <select
-              className="w-full border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-sky-400"
-              defaultValue=""
+              defaultValue={product?.status || "Upcoming"}
+              className="w-full border rounded-lg px-3 py-2"
               {...register("newStatus")}
             >
-              <option value="" disabled>Choose status</option>
               <option value="Ongoing">Ongoing</option>
               <option value="Upcoming">Upcoming</option>
               <option value="Completed">Completed</option>
             </select>
           </div>
 
-          {/* images */}
           <div className="flex flex-col gap-2">
-            <label className="text-xs font-semibold uppercase text-slate-600">Main Image</label>
-            <input className="w-full border rounded-lg px-3 py-2" type="file" accept="image/*" {...register("newMainImage")} />
+            <label>Main Image</label>
+            <input
+              type="file"
+              accept="image/*"
+              className="w-full border rounded-lg px-3 py-2"
+              {...register("newMainImage")}
+            />
           </div>
 
           <div className="flex flex-col gap-2">
-            <label className="text-xs font-semibold uppercase text-slate-600">Sub Image 1</label>
-            <input className="w-full border rounded-lg px-3 py-2" type="file" accept="image/*" {...register("newSubImage1")} />
+            <label>Sub Image 1</label>
+            <input
+              type="file"
+              accept="image/*"
+              className="w-full border rounded-lg px-3 py-2"
+              {...register("newSubImage1")}
+            />
           </div>
 
           <div className="flex flex-col gap-2">
-            <label className="text-xs font-semibold uppercase text-slate-600">Sub Image 2</label>
-            <input className="w-full border rounded-lg px-3 py-2" type="file" accept="image/*" {...register("newSubImage2")} />
+            <label>Sub Image 2</label>
+            <input
+              type="file"
+              accept="image/*"
+              className="w-full border rounded-lg px-3 py-2"
+              {...register("newSubImage2")}
+            />
           </div>
 
           <div className="flex flex-col gap-2">
-            <label className="text-xs font-semibold uppercase text-slate-600">Sub Image 3</label>
-            <input className="w-full border rounded-lg px-3 py-2" type="file" accept="image/*" {...register("newSubImage3")} />
+            <label>Sub Image 3</label>
+            <input
+              type="file"
+              accept="image/*"
+              className="w-full border rounded-lg px-3 py-2"
+              {...register("newSubImage3")}
+            />
           </div>
 
-          {/* submit */}
           <div className="md:col-span-2 flex justify-center pt-3">
-            <button type="submit" className="flex items-center gap-3 bg-sky-600 text-white px-6 py-3 rounded-xl hover:bg-sky-700 transition">
+            <button
+              type="submit"
+              className="flex items-center gap-3 bg-sky-600 text-white px-6 py-3 rounded-xl hover:bg-sky-700 transition"
+            >
               <GrDocumentUpdate className="text-xl" />
               <span className="font-semibold">Update Project</span>
             </button>
